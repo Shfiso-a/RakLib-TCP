@@ -165,27 +165,33 @@ class Server implements ServerInterface{
 		$this->logger->debug("Graceful shutdown complete");
 	}
 
+	/** @phpstan-impure */
 	private function tick() : void{
 		$time = microtime(true);
-		// check for any new tcp connection
+
+		// Check for new TCP connections
 		$this->acceptNewConnections();
 
-		// handle packets from the client
+		// Handle packets from connected clients
 		while($this->receivePacket()){
-			// prevent from high load situations
+			// Processing limit to prevent server from hanging in high-load situations
 			if(--$this->packetLimit <= 0){
 				break;
 			}
 		}
-	
-		// process command queue
+		
+		// Process command queue
 		while($this->eventSource->process()){
-			// not needed
+			// No specific processing needed here
 		}
 
-		// update sessions
+		// Update sessions
 		foreach($this->sessions as $session){
 			$session->update($time);
+			if($session->isFullyDisconnected()){
+				$this->removeSessionInternal($session);
+				$this->logger->debug("Session " . $session->getAddress() . " fully disconnected, cleaning up resources");
+			}
 		}
 
 		// Process IP block timeouts
@@ -198,7 +204,7 @@ class Server implements ServerInterface{
 			}
 		}
 
-				// process IP security (rate limiting)
+		// Process IP security (rate limiting)
 		if(count($this->ipSec) > 0){
 			$now = time();
 			if($now - $this->ticks >= 1){
@@ -206,27 +212,38 @@ class Server implements ServerInterface{
 				$this->ticks = $now;
 			}
 		}
+		
+		// Update bandwidth statistics
+		if(!$this->shutdown and ($this->ticks % self::RAKLIB_TPS) === 0){
+			if($this->sendBytes > 0 or $this->receiveBytes > 0){
+				$this->eventListener->onBandwidthStatsUpdate($this->sendBytes, $this->receiveBytes);
+				$this->sendBytes = 0;
+				$this->receiveBytes = 0;
+			}
+		}
+		
+		++$this->ticks;
 	}
 
-    /**
-	 * accepts new TCP connections
+	/**
+	 * Accepts new TCP connections
 	 */
 	private function acceptNewConnections() : void{
-		// accept multiple pending connections per tick
+		// Accept multiple pending connections per tick
 		$maxNewConnectionsPerTick = 4;
 		for($i = 0; $i < $maxNewConnectionsPerTick; $i++){
 			try{
 				$result = $this->socket->acceptNewConnection();
 				if($result === null){
-					break;
+					break; // No more pending connections
 				}
 				
 				[$clientSocket, $address] = $result;
 				$this->logger->debug("New TCP connection from $address");
 				
-				// new TCP connections need to go through the RakNet connection sequence
-				// they should send an ID_OPEN_CONNECTION_REQUEST_1 as their first packet
-				// we don't create a session yet, we wait for the proper handshake
+				// New TCP connections need to go through the RakNet connection sequence
+				// They should send an ID_OPEN_CONNECTION_REQUEST_1 as their first packet
+				// We don't create a session yet, we wait for the proper handshake
 				
 			}catch(SocketException $e){
 				$this->logger->debug("Failed to accept connection: " . $e->getMessage());
@@ -235,7 +252,7 @@ class Server implements ServerInterface{
 		}
 	}
 
-				/** @phpstan-impure */
+	/** @phpstan-impure */
 	private function receivePacket() : bool{
 		// Get all connected clients
 		$connectedClients = $this->socket->getConnectedClients();
@@ -248,7 +265,7 @@ class Server implements ServerInterface{
 			try{
 				$buffer = $this->socket->readPacket($address);
 				if($buffer === null){
-					continue; 
+					continue; // No data from this client
 				}
 				
 				$len = strlen($buffer);
@@ -293,7 +310,7 @@ class Server implements ServerInterface{
 							$this->logger->debug("Received invalid packet from $address");
 						}
 					}else{
-						// new connection or unconnected message
+						// This could be a new connection, or an unconnected message
 						if(!$this->unconnectedMessageHandler->handleRaw($buffer, $address)){
 							$this->logger->debug("Dropping unhandled unconnected packet from $address: " . bin2hex($buffer));
 						}
@@ -308,14 +325,14 @@ class Server implements ServerInterface{
 			}catch(SocketException $e){
 				$error = $e->getCode();
 				if($error === SOCKET_ECONNRESET){
-					// client disconnected improperly handled by the socket class
+					// Client disconnected improperly, handled by the socket class
 					continue;
 				}
-
 				
 				$this->logger->debug($e->getMessage());
 			}
-
+		}
+		
 		return false;
 	}
 
@@ -349,7 +366,7 @@ class Server implements ServerInterface{
 		try{
 			$internetAddress = new InternetAddress($address, $port, $this->socket->getBindAddress()->getVersion());
 			
-			// only send if client is connected
+			// Only send if client is connected
 			if($this->socket->hasClient($internetAddress)){
 				$this->socket->writePacket($payload, $internetAddress);
 				$this->sendBytes += strlen($payload);
