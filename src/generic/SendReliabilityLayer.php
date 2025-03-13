@@ -27,6 +27,7 @@ use function array_push;
 use function assert;
 use function count;
 use function microtime;
+use function min;
 use function str_split;
 use function strlen;
 
@@ -262,8 +263,7 @@ final class SendReliabilityLayer{
 		$retransmitOlderThan = microtime(true) - self::UNACKED_RETRANSMIT_DELAY;
 		foreach($this->reliableCache as $seq => $pk){
 			if($pk->getTimestamp() < $retransmitOlderThan){
-				//behave as if a NACK was received
-				array_push($this->resendQueue, ...$pk->getPackets());
+				//we don't need it in tcp
 				unset($this->reliableCache[$seq]);
 			}else{
 				break;
@@ -271,11 +271,13 @@ final class SendReliabilityLayer{
 		}
 
 		if(count($this->resendQueue) > 0){
-			foreach($this->resendQueue as $pk){
-				//resends should always be within the reliable window
+			$resendLimit = min(count($this->resendQueue), 16);
+			$packetsToResend = array_slice($this->resendQueue, 0, $resendLimit);
+			$this->resendQueue = array_slice($this->resendQueue, $resendLimit);
+			
+			foreach($packetsToResend as $pk){
 				$this->addToQueue($pk, false);
 			}
-			$this->resendQueue = [];
 		}
 
 		if(count($this->reliableBacklog) > 0){
