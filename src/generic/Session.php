@@ -309,6 +309,7 @@ abstract class Session{
 			$this->disconnectionTime = microtime(true);
 			$this->onDisconnect($reason);
 			$this->logger->debug("Requesting graceful disconnect because \"" . DisconnectReason::toString($reason) . "\"");
+			$this->queueConnectedPacket(new DisconnectionNotification(), PacketReliability::RELIABLE_ORDERED, 0, true);
 		}
 	}
 
