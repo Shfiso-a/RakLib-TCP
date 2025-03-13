@@ -29,9 +29,10 @@ use const AF_INET6;
 use const IPV6_V6ONLY;
 use const SO_RCVBUF;
 use const SO_SNDBUF;
-use const SOCK_DGRAM;
+use const SOCK_STREAM;
 use const SOL_SOCKET;
-use const SOL_UDP;
+use const SOL_TCP;
+use const TCP_NODELAY;
 
 abstract class Socket{
 	protected \Socket $socket;
@@ -40,7 +41,7 @@ abstract class Socket{
 	 * @throws SocketException
 	 */
 	protected function __construct(bool $ipv6){
-		$socket = @socket_create($ipv6 ? AF_INET6 : AF_INET, SOCK_DGRAM, SOL_UDP);
+		$socket = @socket_create($ipv6 ? AF_INET6 : AF_INET, SOCK_STREAM, SOL_TCP);
 		if($socket === false){
 			throw new \RuntimeException("Failed to create socket: " . trim(socket_strerror(socket_last_error())));
 		}
@@ -49,6 +50,7 @@ abstract class Socket{
 		if($ipv6){
 			socket_set_option($this->socket, IPPROTO_IPV6, IPV6_V6ONLY, 1); //Don't map IPv4 to IPv6, the implementation can create another RakLib instance to handle IPv4
 		}
+		socket_set_option($this->socket, SOL_TCP, TCP_NODELAY, 1);
 	}
 
 	public function getSocket() : \Socket{
