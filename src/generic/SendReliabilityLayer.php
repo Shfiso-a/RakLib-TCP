@@ -31,13 +31,12 @@ use function str_split;
 use function strlen;
 
 final class SendReliabilityLayer{
-	private const DATAGRAM_MTU_OVERHEAD = 36 + Datagram::HEADER_SIZE; //IP header (20 bytes) + UDP header (8 bytes) + RakNet weird (8 bytes) = 36
+	private const DATAGRAM_MTU_OVERHEAD = 48 + Datagram::HEADER_SIZE; //IP header (20 bytes) + TCP header (20 bytes) + RakNet weird (8 bytes) = 48
 	private const MIN_POSSIBLE_PACKET_SIZE_LIMIT = Session::MIN_MTU_SIZE - self::DATAGRAM_MTU_OVERHEAD;
-	/**
-	 * Delay in seconds before an unacked packet is retransmitted.
-	 * TODO: Replace this with dynamic calculation based on roundtrip times (that's a complex task for another time)
-	 */
-	private const UNACKED_RETRANSMIT_DELAY = 2.0;
+	
+	// TCP already provides reliability, so we can reduce this value
+	// we still need some retransmission for the RakNet protocol layer
+	private const UNACKED_RETRANSMIT_DELAY = 1.0;
 
 	/** @var EncapsulatedPacket[] */
 	private array $sendQueue = [];
@@ -89,9 +88,9 @@ final class SendReliabilityLayer{
 	){
 		$this->sendOrderedIndex = array_fill(0, PacketReliability::MAX_ORDER_CHANNELS, 0);
 		$this->sendSequencedIndex = array_fill(0, PacketReliability::MAX_ORDER_CHANNELS, 0);
-
+		//keep this for compatibility
 		$this->maxDatagramPayloadSize = $this->mtuSize - self::DATAGRAM_MTU_OVERHEAD;
-
+		
 		$this->reliableWindowStart = 0;
 		$this->reliableWindowEnd = $this->reliableWindowSize;
 	}
