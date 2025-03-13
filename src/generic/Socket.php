@@ -27,7 +27,9 @@ use function trim;
 use const AF_INET;
 use const AF_INET6;
 use const IPV6_V6ONLY;
+use const SO_KEEPALIVE;
 use const SO_RCVBUF;
+use const SO_REUSEADDR;
 use const SO_SNDBUF;
 use const SOCK_STREAM;
 use const SOL_SOCKET;
@@ -52,6 +54,16 @@ abstract class Socket{
 		}
 		socket_set_option($this->socket, SOL_TCP, TCP_NODELAY, 1);
 	}
+		// TCP specific options for better performance in game networking
+		
+		// Disable Nagle's algorithm - send packets immediately without waiting to fill buffers
+		socket_set_option($this->socket, SOL_TCP, TCP_NODELAY, 1);
+		
+		// Enable keep-alive to detect dead connections
+		socket_set_option($this->socket, SOL_SOCKET, SO_KEEPALIVE, 1);
+		
+		// Allow address reuse to prevent "address already in use" when restarting the server
+		socket_set_option($this->socket, SOL_SOCKET, SO_REUSEADDR, 1);
 
 	public function getSocket() : \Socket{
 		return $this->socket;
