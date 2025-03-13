@@ -51,13 +51,21 @@ class ClientSocket extends Socket{
 	 */
 	public function readPacket() : ?string{
 		$buffer = "";
-		if(@socket_recv($this->socket, $buffer, 65535, 0) === false){
+		$result = @socket_recv($this->socket, $buffer, 65535, 0);
+		
+		if($result === false){
 			$errno = socket_last_error($this->socket);
 			if($errno === SOCKET_EWOULDBLOCK){
 				return null;
+			}elseif($errno === SOCKET_ECONNRESET || $errno === SOCKET_ENOTCONN){
+				throw new SocketException("Connection closed by server", $errno);	
 			}
 			throw new SocketException("Failed to recv (errno $errno): " . trim(socket_strerror($errno)), $errno);
+		}elseif($result === 0){
+			// connection closed
+			throw new SocketException("Connection closed by server", 0);	
 		}
+		
 		return $buffer;
 	}
 
@@ -68,6 +76,9 @@ class ClientSocket extends Socket{
 		$result = @socket_send($this->socket, $buffer, strlen($buffer), 0);
 		if($result === false){
 			$errno = socket_last_error($this->socket);
+			if($errno === SOCKET_ECONNRESET || $errno === SOCKET_ENOTCONN){
+				throw new SocketException("Failed to send packet: Connection closed", $errno);
+			}
 			throw new SocketException("Failed to send packet (errno $errno): " . trim(socket_strerror($errno)), $errno);
 		}
 		return $result;
