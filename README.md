@@ -1,7 +1,7 @@
 # RakLib
 ![CI](https://github.com/pmmp/RakLib/workflows/CI/badge.svg)
 
-__UDP network library that follows the RakNet protocol for PHP__
+__UDP(not any more) network library that follows the RakNet protocol for PHP__
 
 This library is very lightweight on actual implementation - it provides the bare minimum to get a Minecraft Pocket Edition server functional. It only currently provides server functionality, and does not support most RakNet features.
 
