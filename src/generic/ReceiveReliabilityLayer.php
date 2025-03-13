@@ -28,7 +28,7 @@ use function count;
 
 final class ReceiveReliabilityLayer{
 
-	public static int $WINDOW_SIZE = 2048;
+	public static int $WINDOW_SIZE = 4096;
 
 	private int $windowStart;
 	private int $windowEnd;
