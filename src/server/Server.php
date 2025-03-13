@@ -167,148 +167,170 @@ class Server implements ServerInterface{
 
 	private function tick() : void{
 		$time = microtime(true);
+		// check for any new tcp connection
+		$this->acceptNewConnections();
+
+		// handle packets from the client
+		while($this->receivePacket()){
+			// prevent from high load situations
+			if(--$this->packetLimit <= 0){
+				break;
+			}
+		}
+	
+		// process command queue
+		while($this->eventSource->process()){
+			// not needed
+		}
+
+		// update sessions
 		foreach($this->sessions as $session){
 			$session->update($time);
-			if($session->isFullyDisconnected()){
-				$this->removeSessionInternal($session);
-			}
 		}
 
-		$this->ipSec = [];
-
-		if(!$this->shutdown and ($this->ticks % self::RAKLIB_TPS) === 0){
-			if($this->sendBytes > 0 or $this->receiveBytes > 0){
-				$this->eventListener->onBandwidthStatsUpdate($this->sendBytes, $this->receiveBytes);
-				$this->sendBytes = 0;
-				$this->receiveBytes = 0;
-			}
-
-			if(count($this->block) > 0){
-				asort($this->block);
-				$now = time();
-				foreach($this->block as $address => $timeout){
-					if($timeout <= $now){
-						unset($this->block[$address]);
-					}else{
-						break;
-					}
+		// Process IP block timeouts
+		if(count($this->block) > 0){
+			$now = time();
+			foreach($this->block as $address => $timeout){
+				if($timeout <= $now){
+					unset($this->block[$address]);
 				}
 			}
 		}
 
-		++$this->ticks;
+				// process IP security (rate limiting)
+		if(count($this->ipSec) > 0){
+			$now = time();
+			if($now - $this->ticks >= 1){
+				$this->ipSec = [];
+				$this->ticks = $now;
+			}
+		}
 	}
 
-	/** @phpstan-impure */
-	private function receivePacket() : bool{
-		try{
-			$buffer = $this->socket->readPacket($addressIp, $addressPort);
-		}catch(SocketException $e){
-			$error = $e->getCode();
-			if($error === SOCKET_ECONNRESET){ //client disconnected improperly, maybe crash or lost connection
-				return true;
+    /**
+	 * accepts new TCP connections
+	 */
+	private function acceptNewConnections() : void{
+		// accept multiple pending connections per tick
+		$maxNewConnectionsPerTick = 4;
+		for($i = 0; $i < $maxNewConnectionsPerTick; $i++){
+			try{
+				$result = $this->socket->acceptNewConnection();
+				if($result === null){
+					break;
+				}
+				
+				[$clientSocket, $address] = $result;
+				$this->logger->debug("New TCP connection from $address");
+				
+				// new TCP connections need to go through the RakNet connection sequence
+				// they should send an ID_OPEN_CONNECTION_REQUEST_1 as their first packet
+				// we don't create a session yet, we wait for the proper handshake
+				
+			}catch(SocketException $e){
+				$this->logger->debug("Failed to accept connection: " . $e->getMessage());
+				break;
 			}
+		}
+	}
 
-			$this->logger->debug($e->getMessage());
+				/** @phpstan-impure */
+	private function receivePacket() : bool{
+		// Get all connected clients
+		$connectedClients = $this->socket->getConnectedClients();
+		if(count($connectedClients) === 0){
 			return false;
 		}
-		if($buffer === null){
-			return false; //no data
-		}
-		assert($addressIp !== null, "Can't be null if we got a buffer");
-		assert($addressPort !== null, "Can't be null if we got a buffer");
-
-		$len = strlen($buffer);
-
-		$this->receiveBytes += $len;
-		if(isset($this->block[$addressIp])){
-			return true;
-		}
-
-		if(isset($this->ipSec[$addressIp])){
-			if(++$this->ipSec[$addressIp] >= $this->packetLimit){
-				$this->blockAddress($addressIp);
-				return true;
-			}
-		}else{
-			$this->ipSec[$addressIp] = 1;
-		}
-
-		if($len < 1){
-			return true;
-		}
-
-		$address = new InternetAddress($addressIp, $addressPort, $this->socket->getBindAddress()->getVersion());
-		try{
-			$session = $this->getSessionByAddress($address);
-			if($session !== null){
-				$header = ord($buffer[0]);
-				if(($header & Datagram::BITFLAG_VALID) !== 0){
-					if(($header & Datagram::BITFLAG_ACK) !== 0){
-						$packet = new ACK();
-					}elseif(($header & Datagram::BITFLAG_NAK) !== 0){
-						$packet = new NACK();
-					}else{
-						$packet = new Datagram();
-					}
-					$packet->decode(new PacketSerializer($buffer));
-					try{
-						$session->handlePacket($packet);
-					}catch(PacketHandlingException $e){
-						$session->getLogger()->error("Error receiving packet: " . $e->getMessage());
-						$session->forciblyDisconnect($e->getDisconnectReason());
-					}
-					return true;
-				}elseif($session->isConnected()){
-					//allows unconnected packets if the session is stuck in DISCONNECTING state, useful if the client
-					//didn't disconnect properly for some reason (e.g. crash)
-					$this->logger->debug("Ignored unconnected packet from $address due to session already opened (0x" . bin2hex($buffer[0]) . ")");
-					return true;
+		
+		// Try to read from each client until we get data
+		foreach($connectedClients as $address){
+			try{
+				$buffer = $this->socket->readPacket($address);
+				if($buffer === null){
+					continue; 
 				}
-			}
-
-			if(!$this->shutdown){
-				if(!($handled = $this->unconnectedMessageHandler->handleRaw($buffer, $address))){
-					foreach($this->rawPacketFilters as $pattern){
-						if(preg_match($pattern, $buffer) > 0){
-							$handled = true;
-							$this->eventListener->onRawPacketReceive($address->getIp(), $address->getPort(), $buffer);
-							break;
+				
+				$len = strlen($buffer);
+				$this->receiveBytes += $len;
+				
+				// Check for IP blocking
+				$addressIp = $address->getIp();
+				if(isset($this->block[$addressIp])){
+					continue;
+				}
+				
+				// Rate limiting
+				if(isset($this->ipSec[$addressIp])){
+					if(++$this->ipSec[$addressIp] >= $this->packetLimit){
+						$this->blockAddress($addressIp);
+						continue;
+					}
+				}else{
+					$this->ipSec[$addressIp] = 1;
+				}
+				
+				if($len < 1){
+					continue;
+				}
+				
+				// Process the packet
+				try{
+					$session = $this->getSessionByAddress($address);
+					if($session !== null){
+						$header = ord($buffer[0]);
+						if(($header & Datagram::BITFLAG_VALID) !== 0){
+							if(($header & Datagram::BITFLAG_ACK) !== 0){
+								$packet = new ACK();
+							}elseif(($header & Datagram::BITFLAG_NAK) !== 0){
+								$packet = new NACK();
+							}else{
+								$packet = new Datagram();
+							}
+							$packet->decode(new PacketSerializer($buffer));
+							$session->handlePacket($packet);
+						}else{
+							$this->logger->debug("Received invalid packet from $address");
+						}
+					}else{
+						// new connection or unconnected message
+						if(!$this->unconnectedMessageHandler->handleRaw($buffer, $address)){
+							$this->logger->debug("Dropping unhandled unconnected packet from $address: " . bin2hex($buffer));
 						}
 					}
+					return true;
+				}catch(BinaryDataException $e){
+					$this->logger->debug("Packet from $address (" . strlen($buffer) . " bytes): " . bin2hex($buffer));
+					$this->logger->debug(get_class($e) . ": " . $e->getMessage() . " in " . $this->traceCleaner->getCleanTraceAsString($e->getTrace()));
+				}catch(PacketHandlingException $e){
+					$this->logger->debug(get_class($e) . ": " . $e->getMessage() . " in " . $this->traceCleaner->getCleanTraceAsString($e->getTrace()));
+				}
+			}catch(SocketException $e){
+				$error = $e->getCode();
+				if($error === SOCKET_ECONNRESET){
+					// client disconnected improperly handled by the socket class
+					continue;
 				}
 
-				if(!$handled){
-					$this->logger->debug("Ignored packet from $address due to no session opened (0x" . bin2hex($buffer[0]) . ")");
-				}
+				
+				$this->logger->debug($e->getMessage());
 			}
-		}catch(BinaryDataException $e){
-			$logFn = function() use ($address, $e, $buffer) : void{
-				$this->logger->debug("Packet from $address (" . strlen($buffer) . " bytes): 0x" . bin2hex($buffer));
-				$this->logger->debug(get_class($e) . ": " . $e->getMessage() . " in " . $e->getFile() . " on line " . $e->getLine());
-				foreach($this->traceCleaner->getTrace(0, $e->getTrace()) as $line){
-					$this->logger->debug($line);
-				}
-				$this->logger->error("Bad packet from $address: " . $e->getMessage());
-			};
-			if($this->logger instanceof \BufferedLogger){
-				$this->logger->buffer($logFn);
-			}else{
-				$logFn();
-			}
-			$this->blockAddress($address->getIp(), 5);
-		}
 
-		return true;
+		return false;
 	}
 
 	public function sendPacket(Packet $packet, InternetAddress $address) : void{
-		$out = new PacketSerializer(); //TODO: reusable streams to reduce allocations
-		$packet->encode($out);
 		try{
-			$this->sendBytes += $this->socket->writePacket($out->getBuffer(), $address->getIp(), $address->getPort());
+			$out = new PacketSerializer();
+			$packet->encode($out);
+			
+			// Only send if client is connected
+			if($this->socket->hasClient($address)){
+				$this->socket->writePacket($out->getBuffer(), $address);
+				$this->sendBytes += strlen($out->getBuffer());
+			}
 		}catch(SocketException $e){
-			$this->logger->debug($e->getMessage());
+			$this->logger->debug("Failed to send packet to $address: " . $e->getMessage());
 		}
 	}
 
@@ -325,9 +347,15 @@ class Server implements ServerInterface{
 
 	public function sendRaw(string $address, int $port, string $payload) : void{
 		try{
-			$this->socket->writePacket($payload, $address, $port);
+			$internetAddress = new InternetAddress($address, $port, $this->socket->getBindAddress()->getVersion());
+			
+			// only send if client is connected
+			if($this->socket->hasClient($internetAddress)){
+				$this->socket->writePacket($payload, $internetAddress);
+				$this->sendBytes += strlen($payload);
+			}
 		}catch(SocketException $e){
-			$this->logger->debug($e->getMessage());
+			$this->logger->debug("Failed to send raw packet to $address:$port: " . $e->getMessage());
 		}
 	}
 
