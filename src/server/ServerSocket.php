@@ -32,10 +32,13 @@ use function strlen;
 use function trim;
 
 class ServerSocket extends Socket{
-	/** @var \Socket[] array of connected client sockets where keys are string addresses */
+	/** @var \Socket[] Array of connected client sockets where keys are string addresses */
 	private array $clientSockets = [];
 	
-	/** @var int max number of pending connections in the queue */
+	/** @var string[] Buffers for incomplete packets, keys are string addresses */
+	private array $receiveBuffers = [];
+	
+	/** @var int Max number of pending connections in the queue */
 	private int $backlog = 128;
 
 	public function __construct(
@@ -65,17 +68,17 @@ class ServerSocket extends Socket{
 	}
 
 	public function enableBroadcast() : bool{
-		// keeping method for API compatibility
+		// Broadcasting concept doesn't apply to TCP, but keep method for API compatibility
 		return true;
 	}
 
 	public function disableBroadcast() : bool{
-		// keeping method for API compatibility
+		// Broadcasting concept doesn't apply to TCP, but keep method for API compatibility
 		return true;
 	}
 
 	/**
-	 * accept new client connection
+	 * Accept a new client connection
 	 * 
 	 * @return array{0: \Socket, 1: InternetAddress}|null Returns [client socket, address] or null if no connection pending
 	 * @throws SocketException
@@ -88,26 +91,27 @@ class ServerSocket extends Socket{
 			if($errno === SOCKET_EWOULDBLOCK){
 				return null;
 			}
-						throw new SocketException("Failed to accept connection (errno $errno): " . trim(socket_strerror($errno)), $errno);
+			throw new SocketException("Failed to accept connection (errno $errno): " . trim(socket_strerror($errno)), $errno);
 		}
 		
-		// get the client's address info
+		// Get client's address info
 		$address = '';
 		$port = 0;
 		socket_getpeername($clientSocket, $address, $port);
 		
-		// create InternetAddress object based on the connection info
+		// Create InternetAddress object based on the connection info
 		$internetAddress = new InternetAddress($address, $port, $this->bindAddress->getVersion());
 		
-		// store the client socket
+		// Store the client socket
 		$addressString = $internetAddress->toString();
 		$this->clientSockets[$addressString] = $clientSocket;
+		$this->receiveBuffers[$addressString] = "";
 		
 		return [$clientSocket, $internetAddress];
 	}
 	
 	/**
-	 * read data from a specific client
+	 * Reads data from a specific client
 	 * 
 	 * @param InternetAddress $address The client's address
 	 * @throws SocketException
@@ -120,54 +124,73 @@ class ServerSocket extends Socket{
 		}
 		
 		$clientSocket = $this->clientSockets[$addressString];
-		$buffer = "";
-		$result = @socket_recv($clientSocket, $buffer, 65535, 0);
+		
+		// Try to receive data
+		$recvBuffer = "";
+		$result = @socket_recv($clientSocket, $recvBuffer, 65535, 0);
 		
 		if($result === false){
 			$errno = socket_last_error($clientSocket);
 			if($errno === SOCKET_EWOULDBLOCK){
 				return null;
 			}elseif($errno === SOCKET_ECONNRESET || $errno === SOCKET_ENOTCONN){
-				// connection closed by client
+				// Connection closed by client
 				$this->removeClient($address);
 				return null;
 			}
 			throw new SocketException("Failed to recv from client {$address} (errno $errno): " . trim(socket_strerror($errno)), $errno);
 		}elseif($result === 0){
-			// connection closed gracefully
+			// Connection closed gracefully
 			$this->removeClient($address);
 			return null;
 		}
-		return $buffer;
+		
+		// Append received data to the buffer for this client
+		$this->receiveBuffers[$addressString] .= $recvBuffer;
+		
+		// Check if we have a complete packet
+		// Since RakNet packets typically have length fields, we'll look for at least 1 byte
+		// and return whatever we have. The Protocol implementation is responsible for handling
+		// incomplete packets.
+		if(strlen($this->receiveBuffers[$addressString]) > 0){
+			$packet = $this->receiveBuffers[$addressString];
+			$this->receiveBuffers[$addressString] = "";
+			return $packet;
+		}
+		
+		return null;
 	}
 
 	/**
+	 * Writes a packet to a specific client
+	 * 
 	 * @throws SocketException
 	 */
 	public function writePacket(string $buffer, InternetAddress $address) : int{
 		$addressString = $address->toString();
 		
 		if(!isset($this->clientSockets[$addressString])){
+			throw new SocketException("Cannot send to $address: not connected", 0);
+		}
+		
+		$clientSocket = $this->clientSockets[$addressString];
+		$result = @socket_send($clientSocket, $buffer, strlen($buffer), 0);
+		
+		if($result === false){
 			$errno = socket_last_error($clientSocket);
 			if($errno === SOCKET_ECONNRESET || $errno === SOCKET_ENOTCONN){
-				// connection closed by client
+				// Connection closed by client
 				$this->removeClient($address);
 				throw new SocketException("Failed to send to $address: Connection closed", $errno);
 			}
 			throw new SocketException("Failed to send to $address (errno $errno): " . trim(socket_strerror($errno)), $errno);
 		}
 		
-		
-		$clientSocket = $this->clientSockets[$addressString];
-		$result = @socket_send($clientSocket, $buffer, strlen($buffer), 0);
-		if($result === false){
-			$errno = socket_last_error($this->socket);
-			throw new SocketException("Failed to send to $dest $port (errno $errno): " . trim(socket_strerror($errno)), $errno);
-		}
 		return $result;
 	}
+	
 	/**
-	 * remove a client connection
+	 * Remove a client connection
 	 */
 	public function removeClient(InternetAddress $address) : void{
 		$addressString = $address->toString();
@@ -175,18 +198,19 @@ class ServerSocket extends Socket{
 		if(isset($this->clientSockets[$addressString])){
 			socket_close($this->clientSockets[$addressString]);
 			unset($this->clientSockets[$addressString]);
+			unset($this->receiveBuffers[$addressString]);
 		}
 	}
 	
 	/**
-	 * check if a client is connected
+	 * Check if a client is connected
 	 */
 	public function hasClient(InternetAddress $address) : bool{
 		return isset($this->clientSockets[$address->toString()]);
 	}
 	
 	/**
-	 * get all connected client addresses
+	 * Get all connected client addresses
 	 * 
 	 * @return InternetAddress[]
 	 */
@@ -200,7 +224,7 @@ class ServerSocket extends Socket{
 	}
 	
 	/**
-	 * close all client connections
+	 * Close all client connections
 	 */
 	public function closeAllClients() : void{
 		foreach($this->clientSockets as $socket){
@@ -210,7 +234,7 @@ class ServerSocket extends Socket{
 	}
 	
 	/**
-	 * close the server socket and all client connections
+	 * Close the server socket and all client connections
 	 */
 	public function close() : void{
 		$this->closeAllClients();
