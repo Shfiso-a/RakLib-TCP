@@ -1,5 +1,4 @@
 # RakLib
-![CI](https://github.com/pmmp/RakLib/workflows/CI/badge.svg)
 
 __UDP(not any more) network library that follows the RakNet protocol for PHP__
 
