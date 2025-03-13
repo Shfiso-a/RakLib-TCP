@@ -4,7 +4,8 @@ __UDP(not any more) network library that follows the RakNet protocol for PHP__
 
 This library is very lightweight on actual implementation - it provides the bare minimum to get a Minecraft Pocket Edition server functional. It only currently provides server functionality, and does not support most RakNet features.
 
-
+i didnt test if this tcp raklib work or not ( for now )
+i will test it soon
 _This project is not affiliated with Jenkins Software LLC nor RakNet._
 
 ```
